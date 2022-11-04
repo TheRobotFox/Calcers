@@ -28,6 +28,32 @@ Variables don't store values but expressions, which only get evaluated when aske
 This means they will automatically update when you change other variables, providing the basic
 functionallity of functions.
 
+### Use previous result as Variable
+```
+a=ans*2
+1
+= 1
+a
+= 2
+a
+= 4
+```
+This can be very fun, like my old pocket Calculators!
+You just have to do...
+```
+a=ans+1
+0
+= 0
+a
+= 1
+
+= 2
+
+= 3
+```
+...and hold enter.
+You just made poor man's CookieClickers!!! (Amazing)
+
 ### Predefined constants
 ```
 r = 1.5

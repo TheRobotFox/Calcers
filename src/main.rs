@@ -187,8 +187,12 @@ fn main() {
                 continue;
             }
         }
-
-        env.input=Some(input.clone());
+        input = input.trim_end().to_string();
+        if input.len() == 0{
+            input=env.input.clone().unwrap_or(String::new());
+        }else{
+            env.input=Some(input.to_string());
+        }
 
         // Lex input
         let lex = Token::lexer(input.trim_end());

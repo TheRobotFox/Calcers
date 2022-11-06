@@ -25,8 +25,30 @@ b
 = 2
 ```
 Variables don't store values but expressions, which only get evaluated when asked to.
-This means they will automatically update when you change other variables, providing the basic
-functionallity of functions.
+This means they will automatically update when you change other variables.
+
+### Functions
+```
+f(x)=x^2
+f(2)
+= 4
+f(x=3)
+= 9
+```
+Function are now a thing! They are basically just Variables with automatic parameter mapping
+eg. F(idx_0 -> a, idx_1 -> b, ...). This means that you can call all Variables with Parameter mapping.
+Since normal variables are zero parameter functions there is no automated mapping, but the named mapping
+works for all defined objects.
+```
+F=m*a
+F(m=100,a=9.81)
+= 981
+
+F(m,a) = m*a
+F(100,9.81)
+= 981
+```
+Works the same!
 
 ### Use previous result as Variable
 ```

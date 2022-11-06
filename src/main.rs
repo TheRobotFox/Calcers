@@ -1,8 +1,11 @@
 use std::boxed::Box;
+use std::path::Path;
 use logos::Logos;
 use statrs::function::gamma;
-use serde_derive::{Serialize, Deserialize};
 use std::option::Option;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::env;
 use crate::parsers::*;
 
 pub mod parsers;
@@ -13,11 +16,12 @@ trait Object {
     fn get_val(&self) -> Expr;
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Variable{
     name: String,
     val: Expr,
-    argnames: Vec<String>
+    argnames: Vec<String>,
+    def_string: Option<String>
 }
 
 impl Variable{
@@ -38,7 +42,7 @@ impl Variable{
         // ordered
         while index<self.argnames.len() {
             match &arglist[index] {
-                Arg::Ordered(expr) => vars.push(Variable{ name: self.argnames[index].clone(), val: expr.clone(), argnames: vec![]}),
+                Arg::Ordered(expr) => vars.push(Variable{ name: self.argnames[index].clone(), val: expr.clone(), argnames: vec![], def_string: None}),
                 Arg::Named(var) =>{
                     vars.push(var.clone());
                     break;
@@ -49,7 +53,7 @@ impl Variable{
         while index<arglist.len() {
             match &arglist[index] {
                 Arg::Named(var) => vars.push(var.clone()),
-                _ => return Err(HandlerResult::Error(String::from(String::from(format!("Too many parameters! Try named mapping")))))
+                _ => return Err(HandlerResult::Error(String::from(format!("Too many parameters! Try named mapping"))))
             };
             index+=1;
         }
@@ -63,6 +67,21 @@ impl Variable{
 
     }
     fn compile_expr(&self, expr: &mut Expr, args: &Vec<Variable>) -> Result<(),String>{
+        match &mut expr.operation {
+            Token::Call(func) => {
+                for arg in &mut func.arglist {
+                    match arg {
+                        Arg::Ordered(expr) =>{
+                            self.compile_expr(expr, args)?;
+                        }
+                        Arg::Named(var) =>{
+                            self.compile_expr(&mut var.val, args)?;
+                        }
+                    };
+                }
+            }
+            _ => ()
+        };
         match expr.operation.clone(){
             Token::Var(name) => {
                 for var in args{
@@ -72,9 +91,9 @@ impl Variable{
                     }
                 }
                 if self.argnames.contains(&name){
-                    return Err(String::from(format!("Local variable \"{name}\" is not defined!")))
+                    return Err(format!("Local variable \"{name}\" is not defined!"))
                 }
-            }
+            },
             _ => {
                 if expr.a.is_some(){
                     self.compile_expr(&mut expr.a.as_mut().unwrap(), args)?;
@@ -86,37 +105,53 @@ impl Variable{
         };
         Ok(())
     }
+    fn obj_type(&self) -> &str{
+        if self.argnames.len()==0 {"Variable"}else{"Function"}
+    }
 }
         
         
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct FunctionCall{
     name: String,
     arglist: Vec<Arg>
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Arg{
     Ordered(Expr),
     Named(Variable),
 }
-        
-        
-#[derive(Serialize, Deserialize, Debug)]
+
+#[derive(Clone)]
+pub enum MacroVal{
+    User(Vec<String>),
+    Internal(fn(&mut logos::Lexer<Token>, &mut Environment) -> HandlerResult)
+}
+#[derive(Clone)]
+pub struct Macro{
+    name: String,
+    val: MacroVal
+}
+
+
 pub struct Environment{
     run: bool,
     variables: Vec<Variable>,
-    input: String,
+    macros: Vec<Macro>,
     last_input: Option<String>,
     last_result: Option<Number>
 }
 
-#[derive(Logos, Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Logos, PartialEq, Debug, Clone)]
 pub enum Token{
+    // Comments
+    #[regex("\"[^\"]*\"", logos::skip)]
+    Comment,
 
     #[token(":")]
-    Command,
+    Macro,
 
     #[token("ans")]
     Ans,
@@ -171,8 +206,9 @@ pub enum Token{
     PrenticesClosed,
 
     #[error]
+    // whitespaces
     #[regex(r"[ \t\n\f]", logos::skip)]
-    Error,
+    Unknown,
 
     // Internal States
     EOF,
@@ -180,7 +216,7 @@ pub enum Token{
     Var(String)
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Expr{
     a: Option<Box<Expr>>,
     b: Option<Box<Expr>>,
@@ -196,7 +232,7 @@ impl Expr{
             Token::Var(name) => {
                 let var = env.variables.iter().find(|&var| var.name==*name);
                 if var.is_none(){
-                    return Err(HandlerResult::Error(String::from(format!("Variable '{}' not defined!", name))));
+                    return Err(HandlerResult::Error(format!("Variable '{}' not defined!", name)));
                 }
                 return var.unwrap().val.eval(env);
             },
@@ -209,7 +245,7 @@ impl Expr{
             Token::Call(func) => {
                 let var = env.variables.iter().find(|&var| var.name==*func.name);
                 if var.is_none(){
-                    return Err(HandlerResult::Error(String::from(format!("Function '{}' not defined!", func.name))));
+                    return Err(HandlerResult::Error(format!("Function '{}' not defined!", func.name)));
                 }
                 return var.unwrap().eval(&func.arglist)?.eval(env);
             },
@@ -240,12 +276,17 @@ impl Expr{
                 }
             },
             Token::Pow => Ok(a.powf(b)),
-            t @ _ => Err(HandlerResult::Error(String::from(format!("Unexpected Token '{:?}' as operation.", t))))
+            Token::Greater => Ok(Into::<i8>::into(a>b).into()),
+            Token::Less => Ok(Into::<i8>::into(a<b).into()),
+            Token::Equal => Ok(Into::<i8>::into(a==b).into()),
+            t @ _ => Err(HandlerResult::Error(format!("Unexpected Token '{:?}' as operation.", t)))
                 
         }
     }
 }
 
+// TODO: Disallow self reference Variables
+// TODO: add eval modifier
 // TODO: refactor ParseHandlers
 // TODO: use defined functions
 // TODO: map all operators to functions
@@ -259,15 +300,91 @@ impl Expr{
 // TODO: general cleaness
 // TODO: port to actual Calculator
 // TODO: Arbitrary precision Integers
+// TODO: Calc Class with env generator
+// TODO: Env mod (...)
 
+pub fn calc_parse(input: &String, env: &mut Environment){
+
+    let parsers: &[Box<dyn ParseHandler>] = &[Box::new(CommentHandler),Box::new(AssignHandler), Box::new(MacroHandler), Box::new(ExprHandler)];
+    let mut input = input.clone();
+
+    // if no input, use last valid input or skip
+    if input.len()==0{
+        if env.last_input.is_some(){
+            input = env.last_input.as_ref().unwrap().clone().clone();
+        }else{
+            return;
+        }
+    }
+    
+    env.last_input = None;
+
+    // Lex input
+    let lex = Token::lexer(input.as_str());
+
+    for parser in parsers {
+        match parser.handle(&mut lex.clone(), env) {
+            HandlerResult::Ok => break,
+            HandlerResult::Pass => {
+                //println!("Pass");
+                continue;
+            },
+            HandlerResult::Error(reason) => {
+                println!("[ERROR] {reason}");
+                break;
+            },
+            HandlerResult::Exit => return
+        };
+    }
+}
+
+pub fn calc_parse_file<T: AsRef<Path> + std::fmt::Debug>(path: T, env: &mut Environment) -> HandlerResult{
+
+    let reader = match File::open(&path){
+        Ok(file) => BufReader::new(file),
+        Err(error) => {
+        return HandlerResult::Error(format!("Could not open file \"{:?}\": {error}", path));
+        }
+    };
+
+    let lines = reader.lines();
+
+    for line in lines{
+        match line {
+            Ok(str) => calc_parse(&str, env),
+            Err(error) => return HandlerResult::Error(format!("Could not read file: {}",error.to_string()))
+        };
+    }
+    HandlerResult::Ok
+}
+pub const VERSION: &str = "0.7.4";
 
 fn main() {
-    println!("Calc 0.6.1");
+    println!("Calc v{VERSION}");
+
+    let mut env = Environment{run: true,
+                                           variables: Vec::new(),
+                                           last_input: None,
+                                           last_result: None,
+                                           macros: vec![Macro{name: String::from("save"), val: MacroVal::Internal(MacroHandler::parse_save)},
+                                                        Macro{name: String::from("load"), val: MacroVal::Internal(MacroHandler::parse_load)},
+                                                        Macro{name: String::from("clear"), val: MacroVal::Internal(MacroHandler::parse_load)}
+                                                    ]
+                                          };
+
+    for path in env::args().skip(1){
+        match calc_parse_file(&path, &mut env){
+            HandlerResult::Ok => (),
+            HandlerResult::Error(reason) => println!("[ERROR] While loading file \"{path}\": {reason}"),
+            _ => println!("Unexpected Error! 357")
+        }
+    }
+
     let mut input: String = String::new();
-    let mut env = Environment{run: true, variables: Vec::new(), input: String::new(), last_input: None, last_result: None};
-    let parsers: &[Box<dyn ParseHandler>] = &[Box::new(AssignHandler), Box::new(CommandHandler), Box::new(ExprHandler)];
     while env.run {
+
         input.clear();
+
         // get Input
         match std::io::stdin().read_line(&mut input){
             Ok(size) => if size==0{continue;},
@@ -277,35 +394,6 @@ fn main() {
             }
         }
         input = input.trim_end().to_string();
-        
-        // if no input, use last valid input or skip
-        if input.len()==0{
-            if env.last_input.is_some(){
-                input = env.last_input.clone().unwrap();
-            }else{
-                continue;
-            }
-        }
-
-        env.input = input.clone();
-        env.last_input = None;
-
-        // Lex input
-        let lex = Token::lexer(input.as_str());
-        
-        for parser in parsers {
-            match parser.handle(&mut lex.clone(), &mut env) {
-                HandlerResult::Ok => break,
-                HandlerResult::Pass => {
-                    //println!("Pass");
-                    continue
-                },
-                HandlerResult::Error(reason) => {
-                    println!("[ERROR] {reason}");
-                    break;
-                },
-                HandlerResult::Exit => return
-            };
-        }
+        calc_parse(&input, &mut env);
     }
 }

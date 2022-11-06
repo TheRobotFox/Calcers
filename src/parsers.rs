@@ -1,14 +1,14 @@
 use std::boxed::Box;
 use std::option::Option;
 use std::fs::File;
-use std::io::{Read, Write};
-use serde_json;
-use crate::{Expr, Token, Environment, Variable, FunctionCall, Arg};
+use std::io::Write;
+use crate::{Expr, Token, Environment, Variable, FunctionCall, Arg, VERSION, calc_parse_file, MacroVal, calc_parse, Macro};
 
 pub trait ParseHandler{
     fn handle(&self, lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult;
 }
 
+#[derive(Clone)]
 pub enum HandlerResult{
     Error(String),
     Pass,
@@ -33,7 +33,13 @@ pub enum HandlerResult{
 // EXPR6 -> EXPR6! | EXPR7
 // EXPR7 -> NUM | (EXPR1) | VAR | FUNC ARGLIST
 
+fn check_eof(lex: &mut logos::Lexer<Token>, success: HandlerResult) -> HandlerResult{
 
+    match lex.next(){
+        None => success,
+        Some(token) => HandlerResult::Error(format!("Expected 'EOF' got '{:?}' (\"{}\") at {:?}", token, lex.slice(), lex.span()))
+    }
+}
 fn parse_arglist(lex: &mut logos::Lexer<Token>) -> Result<Vec<Arg>, HandlerResult> {
     // let mut lex_tmp = lex.clone();
     // match ExprHandler::parse_val(&mut lex_tmp) {
@@ -53,7 +59,7 @@ fn parse_arglist(lex: &mut logos::Lexer<Token>) -> Result<Vec<Arg>, HandlerResul
             loop {
 
                 lex_tmp = lex.clone();
-                match AssignHandler::parse_assign(&mut lex_tmp) {
+                match AssignHandler::parse_variable(&mut lex_tmp) {
                     Ok(var) => {
                         arglist.push(Arg::Named(var));
                         *lex=lex_tmp;
@@ -73,7 +79,7 @@ fn parse_arglist(lex: &mut logos::Lexer<Token>) -> Result<Vec<Arg>, HandlerResul
                 match lex.next() {
                     Some(Token::Comma) => (),
                     Some(Token::PrenticesClosed) => return Ok(arglist),
-                    t @ _ => return Err(HandlerResult::Error(String::from(format!("Expected 'Comma' or ')' got '{:?}' (\"{}\") at {:?}. ", t.unwrap_or(Token::EOF), lex.slice(), lex.span()))))
+                    t @ _ => return Err(HandlerResult::Error(format!("Expected 'Comma' or ')' got '{:?}' (\"{}\") at {:?}. ", t.unwrap_or(Token::EOF), lex.slice(), lex.span())))
                 };
             };
             // Named args
@@ -82,10 +88,10 @@ fn parse_arglist(lex: &mut logos::Lexer<Token>) -> Result<Vec<Arg>, HandlerResul
                 match lex.next() {
                     Some(Token::Comma) => (),
                     Some(Token::PrenticesClosed) => return Ok(arglist),
-                    t @ _ => return Err(HandlerResult::Error(String::from(format!("Expected 'Comma' or ')' got '{:?}' (\"{}\") at {:?}. ", t.unwrap_or(Token::EOF), lex.slice(), lex.span()))))
+                    t @ _ => return Err(HandlerResult::Error(format!("Expected 'Comma' or ')' got '{:?}' (\"{}\") at {:?}. ", t.unwrap_or(Token::EOF), lex.slice(), lex.span())))
                 };
 
-                match AssignHandler::parse_assign(lex) {
+                match AssignHandler::parse_variable(lex) {
                     Ok(var) => {
                         arglist.push(Arg::Named(var));
                     },
@@ -104,6 +110,14 @@ impl ExprHandler{
 
     fn parse_val(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
         match lex.next() {
+            Some(Token::Add) => return Self::parse_val(lex),
+            Some(Token::Sub) => {
+                let expr = match Self::parse_val(lex){
+                    Ok(expr) => expr,
+                    Err(reason) => return Err(reason)
+                };
+                Ok(Expr { a: Some(Box::new(Expr{a: None, b: None, operation: Token::Num(-1.0)})), b: Some(Box::new(expr)), operation: Token::Mul })
+            }
             Some(Token::Num(n)) => Ok(Expr { a: None, b: None, operation: Token::Num(n.clone()) }) ,
             Some(Token::Name(name)) =>{
                 let mut lex_tmp = lex.clone();
@@ -119,18 +133,18 @@ impl ExprHandler{
                 }
             },
             Some(Token::PrenticesOpen) => {
-                let expr = Self::parse_expr_add(lex)?;
+                let expr = Self::parse_expr(lex)?;
 
                 let prentices_closed:Option<Token> = lex.next();
                 if prentices_closed != Some(Token::PrenticesClosed) {
-                    return Err(String::from(format!("Expected ')' got '{:?}' (\"{}\") at {:?}", prentices_closed.unwrap_or(Token::EOF), lex.slice(), lex.span())));
+                    return Err(format!("Expected ')' got '{:?}' (\"{}\") at {:?}", prentices_closed.unwrap_or(Token::EOF), lex.slice(), lex.span()));
                 }
 
                 Ok(expr)
             },
             Some(Token::Ans) => Ok(Expr { a: None, b: None, operation: Token::Ans }),
             None => Err(String::from("Unexpected EOF!")),
-            t @ _ => Err(String::from(format!("Expected '(' or 'Num' got '{:?}' (\"{}\") at {:?}. ", t.unwrap(), lex.slice(), lex.span())))
+            t @ _ => Err(format!("Expected '(' or 'Num' got '{:?}' (\"{}\") at {:?}. ", t.unwrap(), lex.slice(), lex.span()))
         }
     }
 
@@ -170,7 +184,7 @@ impl ExprHandler{
             }
         }
         Ok(next_expr)
-        //Err(ParseError { error: String::from(format!("Expected {:?} or 'EOF' got '{:?}' (\"{}\") at {:?}.", expect.as_slice(), next_token.unwrap(), lex.slice(), lex.span())) })
+        //Err(ParseError { error: format!("Expected {:?} or 'EOF' got '{:?}' (\"{}\") at {:?}.", expect.as_slice(), next_token.unwrap(), lex.slice(), lex.span())) })
     }
 
     fn parse_expr_pow(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
@@ -190,9 +204,12 @@ impl ExprHandler{
 
         Self::parse_level(lex, &[Token::Add], Self::parse_expr_sub)
     }
+    fn parse_expr_cmp(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
+
+        Self::parse_level(lex, &[Token::Less, Token::Greater, Token::Equal], Self::parse_expr_add)
+    }
     pub fn parse_expr(lex: &mut logos::Lexer<Token>) -> Result<Expr, String>{
-        let expr = Self::parse_expr_add(lex)?;
-        return Ok(expr);
+        return Ok(Self::parse_expr_cmp(lex)?);
     }
 }
 
@@ -203,10 +220,10 @@ impl ParseHandler for ExprHandler{
             Err(reason) =>{return HandlerResult::Error(reason);}
         };
 
-        let token = lex.next();
-        if token.is_some() {
-            return HandlerResult::Error(String::from(format!("Expected 'EOF' got '{:?}' (\"{}\") at {:?}", token.unwrap(), lex.slice(), lex.span())));
-        }
+        match lex.next() {
+            None =>(),
+            Some(e@_) => return HandlerResult::Error(format!("Expected 'EOF' got '{:?}' (\"{:?}\") at {:?}", e, lex.slice(), lex.span()))
+        };
 
         let val = match expr.eval(env) {
             Ok(val) => val,
@@ -215,7 +232,7 @@ impl ParseHandler for ExprHandler{
         println!("= {}", val);
 
         env.last_result=Some(val);
-        env.last_input=Some(env.input.clone());
+        env.last_input=Some(lex.source().to_string());
         HandlerResult::Ok
     }
 }
@@ -248,7 +265,7 @@ impl AssignHandler{
                         Some(Token::Comma) => (),
                         Some(Token::PrenticesClosed) => return Ok(argnames),
                         Some(Token::Assign) => return Err(HandlerResult::Pass),
-                        t @ _ => return Err(HandlerResult::Error(String::from(format!("Expected 'COMMA' or ')' got '{:?}' (\"{}\") at {:?}. ", t.unwrap_or(Token::EOF), lex.slice(), lex.span()))))
+                        t @ _ => return Err(HandlerResult::Error(format!("Expected 'COMMA' or ')' got '{:?}' (\"{}\") at {:?}. ", t.unwrap_or(Token::EOF), lex.slice(), lex.span())))
                     };
                 }
             },
@@ -257,7 +274,7 @@ impl AssignHandler{
 
     }
 
-    fn parse_assign(lex: &mut logos::Lexer<Token>) -> Result<Variable, HandlerResult>{
+    fn parse_variable(lex: &mut logos::Lexer<Token>) -> Result<Variable, HandlerResult>{
         
         let name = match lex.next() {
             Some(Token::Name(name)) => name,
@@ -277,7 +294,6 @@ impl AssignHandler{
         };
         match lex.next() {
             Some(Token::Assign) => (),
-            // Wrong Syntax, pass to next Parser
             _ => return Err(HandlerResult::Pass)
         };
 
@@ -285,121 +301,214 @@ impl AssignHandler{
             Ok(expr) => expr,
             Err(reason) => return Err(HandlerResult::Error(reason))
         };
-        Ok(Variable{name: name, val: expr, argnames: argnames})
+
+
+        Ok(Variable{name: name, val: expr, argnames: argnames, def_string: None})
     }
+    fn parse_macro(lex: &mut logos::Lexer<Token>) -> Result<Macro, HandlerResult>{
+
+        let name = match lex.next() {
+            Some(Token::Name(name)) => name,
+            _ => return Err(HandlerResult::Pass)
+        };
+
+        let mut lex_tmp = lex.clone();
+        let argnames = match Self::parse_argnames(&mut lex_tmp) {
+            Ok(argnames) => {
+                *lex=lex_tmp;
+                argnames
+            },
+            Err(HandlerResult::Pass) => vec![],
+            Err(HandlerResult::Error(reason)) => return Err(HandlerResult::Error(reason)),
+            _ => return Err(HandlerResult::Error(String::from("Unexpected error! 319")))
+        };
+
+        match lex.next() {
+            Some(Token::Macro) => (),
+            _ => return Err(HandlerResult::Pass)
+        };
+
+        // Parse Commands
+        let commands: Vec<String> = lex.remainder().split("|").map(str::to_string).collect();
+        
+
+        Ok(Macro { name: name, val: MacroVal::User(commands) })
+    }
+
 }
 
 impl ParseHandler for AssignHandler{
     fn handle(&self, lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
     {
-        let def = match Self::parse_assign(lex){
-            Ok(var) => var,
-            Err(e) => return e
-        };
+        let mut lex_tmp = lex.clone();
+        match Self::parse_variable(&mut lex_tmp){
+            Ok(mut var) => {
+                var.def_string=Some(lex.source().to_string());
 
-        match env.variables.iter_mut().find(|var| var.name==def.name) {
-            None => {env.variables.push(def);},
-            Some(var) => {
-                *var=def;
+                // check self reference
+                for token in lex.into_iter().skip(2){
+                    match token {
+                        Token::Name(n) => {
+                            if n==var.name{
+                                // fix self reference
+                                let prev_val = match var.val.eval(env) {
+                                    Ok(val) => val,
+                                    Err(error) => return error
+                                };
+
+                                let mut expr = var.val.clone();
+                                match var.compile_expr(&mut expr,
+                                            &vec![Variable{argnames: vec![], def_string: None, name: var.name.clone(),
+                                                val: Expr { a: None, b: None, operation: Token::Num(prev_val)}}])
+                                {
+                                    Ok(()) => (),
+                                    Err(error) => return HandlerResult::Error(error)
+                                }
+                                var.val=expr;
+                                break;
+                            }
+                        },
+                        _ => ()
+                    }
+                }
+                *lex=lex_tmp;
+                match env.variables.iter_mut().find(|e| e.name==var.name) {
+                    None => {env.variables.push(var);},
+                    Some(e) => {
+                        *e=var;
+                    }
+                };
+                check_eof(lex, HandlerResult::Ok)
+            },
+            // Assign Macro
+            Err(HandlerResult::Pass) => match Self::parse_macro(lex){
+                Ok(mac) =>{
+                    match env.macros.iter_mut().find(|e| e.name==mac.name) {
+                        None => {env.macros.push(mac);},
+                        Some(e) => {
+                            *e=mac;
+                        }
+                    };
+                    HandlerResult::Ok
+                },
+                Err(e) => return e
             }
-        };
-        
-        HandlerResult::Ok
+            Err(e) => return e
+        }
     }
 }
 
-pub struct CommandHandler;
+pub struct MacroHandler;
 
-impl CommandHandler{
-	fn parse_save(lex: &mut logos::Lexer<Token>, env: &Environment) -> HandlerResult
+impl MacroHandler{
+	pub fn parse_save(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
 	{
 
 		let path = match lex.next(){
 			Some(Token::Name(path)) => path,
 			t @ _ => {
-			return HandlerResult::Error(String::from(format!("Expected 'Name' got '{:?}'.", t.unwrap_or(Token::EOF))));
+			return HandlerResult::Error(format!("Expected 'Name' got '{:?}'.", t.unwrap_or(Token::EOF)));
 			}
 		};
 
-		let save_str = match serde_json::to_string_pretty(&env){
-			Ok(str) => str,
-			Err(error) => {
-			return HandlerResult::Error(String::from(format!("Could not serialize environment: {error}")));
-			}
-		};
+        let mut buff: String = format!("\"Calcers v{VERSION} Environment\"\n\n\n");
+
+        for var in &env.variables{
+            match &var.def_string{
+                Some(str) => buff+=format!("\"Define {} {}\"\n{}\n\n", var.obj_type(), &var.name, str).as_str(),
+                None => return HandlerResult::Error(format!("Definition of {} \"{}\" not known!", var.obj_type(), var.name))
+            }
+        }
 
 		let mut file = match File::create(&path){
 			Ok(file) => file,
 			Err(error) => {
-			return HandlerResult::Error(String::from(format!("Could not open file \"{path}\": {error}")));
+			return HandlerResult::Error(format!("Could not open file \"{path}\": {error}"));
 			}
 		};
 
-		match file.write_all(save_str.as_bytes()) {
+		match file.write_all(buff.as_bytes()) {
 			Ok(()) => HandlerResult::Ok,
-			Err(error) => HandlerResult::Error(String::from(format!("Could not write to file \"{path}\": {error}")))
+			Err(error) => HandlerResult::Error(format!("Could not write to file \"{path}\": {error}"))
 		}
 			
 	}
-	fn parse_load(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
+	pub fn parse_load(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
 	{
 
-                let path = match lex.next() {
-                    Some(Token::Name(path)) => path,
-                    t @ _ => {
-                        return HandlerResult::Error(format!("Expected 'Name' got '{:?}'. \nUsage: load [Path]", t.unwrap_or(Token::EOF)));
-                    }
-                };
-
-                let mut file = match File::open(&path) {
-                    Ok(file) => file,
-                    Err(error) => {
-                        return HandlerResult::Error(format!("Could not open file \"{path}\": {error}"));
-                    }
-                };
-                let mut load_str = String::new();
-                match file.read_to_string(&mut load_str) {
-                    Ok(_length) => (),
-                    Err(error) => {
-                        return HandlerResult::Error(format!("Could not read file \"{path}\": {error}"));
-                    }
-                }
-
-                *env =  match serde_json::from_str(&load_str) {
-                    Ok(env) => env,
-                    Err(error) => {
-                        return HandlerResult::Error(format!("Could not parse file: {error}"));
-                    }
-                };
+        let path = match lex.next() {
+            Some(Token::Name(path)) => path,
+            t @ _ => {
+                return HandlerResult::Error(format!("Expected 'Name' got '{:?}'. \nUsage: load [Path]", t.unwrap_or(Token::EOF)));
+            }
+        };
+        match calc_parse_file(path, env){
+            HandlerResult::Ok => (),
+            HandlerResult::Error(reason) => return HandlerResult::Error(reason),
+            _ => return HandlerResult::Error(String::from("Unexpected error! 378"))
+        }
 		println!("Successfully loaded environment");
 		HandlerResult::Ok
 	}
+	pub fn parse_clear(_lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
+    {
+        *env = Environment{run: true,
+                                    variables: Vec::new(),
+                                    last_input: None,
+                                    last_result: None,
+                                    macros: vec![Macro{name: String::from("save"), val: MacroVal::Internal(MacroHandler::parse_save)},
+                                                Macro{name: String::from("load"), val: MacroVal::Internal(MacroHandler::parse_load)},
+                                                Macro{name: String::from("clear"), val: MacroVal::Internal(MacroHandler::parse_load)}
+                                            ]
+                                    };
+        HandlerResult::Ok
+    }
+	pub fn parse_exit(_lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
+    {
+        env.run=false;
+        HandlerResult::Ok
+    }
 }
 
-impl ParseHandler for CommandHandler{
+
+impl ParseHandler for MacroHandler{
     fn handle(&self, lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
     {
-	if lex.next()!=Some(Token::Command){
-		return HandlerResult::Pass;
-	}
-	let command = match lex.next() {
-		Some(Token::Name(command)) => command,
-		t @ _ => { return HandlerResult::Error(String::from(format!("Expected 'Name' got '{:?}' (\"{}\") at {:?}", t.unwrap_or(Token::EOF), lex.slice(), lex.span())))}
-	};
-	match command.as_str(){
-		"save" => Self::parse_save(lex, env),
-		"load" => Self::parse_load(lex, env),
-		"clear" => {
-			*env = Environment{run: true, variables: Vec::new(), input: String::new(), last_input: None, last_result: None};
-			HandlerResult::Ok
-		},
-		"exit" => {
-			println!("ByeBye!");
-			HandlerResult::Exit
-		}
-		_ => {
-			HandlerResult::Error(String::from(format!("Unknown Command \"{command}\"")))
-		}
-	}
+        if lex.next()!=Some(Token::Macro){
+            return HandlerResult::Pass;
+        }
+        let name = match lex.next() {
+            Some(Token::Name(command)) => command,
+            t @ _ => { return HandlerResult::Error(format!("Expected 'Name' got '{:?}' (\"{}\") at {:?}", t.unwrap_or(Token::EOF), lex.slice(), lex.span()))}
+        };
+
+        let mac = match env.macros.iter().find(|e| e.name==name) {
+            Some(mac) => mac.clone(),
+            None => return HandlerResult::Error(format!("Unknown Macro \"{name}\"!"))
+        };
+
+        let res = match &mac.val {
+            MacroVal::Internal(func) => func(lex, env),
+            MacroVal::User(commands) =>{
+                for command in commands{
+                    calc_parse(&command, env);
+                }
+                HandlerResult::Ok
+            }
+        };
+
+        check_eof(lex, res)
+    }
+}
+
+pub struct CommentHandler;
+impl ParseHandler for CommentHandler{
+    fn handle(&self, lex: &mut logos::Lexer<Token>, _env: &mut Environment) -> HandlerResult{
+        match lex.next() {
+            None => HandlerResult::Ok,
+            Some(Token::Comment) => HandlerResult::Ok,
+            _ => HandlerResult::Pass
+        }
+
     }
 }

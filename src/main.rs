@@ -262,7 +262,7 @@ impl Expr{
 
 
 fn main() {
-    println!("Calc 0.5.2");
+    println!("Calc 0.6.1");
     let mut input: String = String::new();
     let mut env = Environment{run: true, variables: Vec::new(), input: String::new(), last_input: None, last_result: None};
     let parsers: &[Box<dyn ParseHandler>] = &[Box::new(AssignHandler), Box::new(CommandHandler), Box::new(ExprHandler)];

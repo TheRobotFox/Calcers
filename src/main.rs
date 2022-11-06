@@ -115,7 +115,7 @@ pub struct Environment{
 #[derive(Logos, Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Token{
 
-    #[token("#")]
+    #[token(":")]
     Command,
 
     #[token("ans")]

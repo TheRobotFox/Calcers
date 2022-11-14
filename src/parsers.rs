@@ -2,7 +2,7 @@ use std::boxed::Box;
 use std::option::Option;
 use std::fs::File;
 use std::io::Write;
-use crate::{Expr, Token, Environment, Variable, FunctionCall, Arg, VERSION, calc_parse_file, MacroVal, calc_parse, Macro};
+use crate::{Expr, Token, Environment, Variable, FunctionCall, Arg, VERSION, calc_parse_file, MacroVal, calc_parse, Macro, Function};
 
 pub trait ParseHandler{
     fn handle(&self, lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult;
@@ -40,7 +40,7 @@ fn check_eof(lex: &mut logos::Lexer<Token>, success: HandlerResult) -> HandlerRe
         Some(token) => HandlerResult::Error(format!("Expected 'EOF' got '{:?}' (\"{}\") at {:?}", token, lex.slice(), lex.span()))
     }
 }
-fn parse_arglist(lex: &mut logos::Lexer<Token>) -> Result<Vec<Arg>, HandlerResult> {
+fn parse_arglist(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Vec<Arg>, HandlerResult> {
     // let mut lex_tmp = lex.clone();
     // match ExprHandler::parse_val(&mut lex_tmp) {
     //     Ok(expr) => {
@@ -59,14 +59,14 @@ fn parse_arglist(lex: &mut logos::Lexer<Token>) -> Result<Vec<Arg>, HandlerResul
             loop {
 
                 lex_tmp = lex.clone();
-                match AssignHandler::parse_variable(&mut lex_tmp) {
+                match AssignHandler::parse_variable(&mut lex_tmp, env) {
                     Ok(var) => {
                         arglist.push(Arg::Named(var));
                         *lex=lex_tmp;
                         break;
                     },
                     Err(HandlerResult::Pass) => {
-                        let expr = match ExprHandler::parse_expr(lex) {
+                        let expr = match ExprHandler::parse_expr(lex, env) {
                             Ok(expr) => expr,
                             Err(reason) => return Err(HandlerResult::Error(reason))
                         };
@@ -91,7 +91,7 @@ fn parse_arglist(lex: &mut logos::Lexer<Token>) -> Result<Vec<Arg>, HandlerResul
                     t @ _ => return Err(HandlerResult::Error(format!("Expected 'Comma' or ')' got '{:?}' (\"{}\") at {:?}. ", t.unwrap_or(Token::EOF), lex.slice(), lex.span())))
                 };
 
-                match AssignHandler::parse_variable(lex) {
+                match AssignHandler::parse_variable(lex, env) {
                     Ok(var) => {
                         arglist.push(Arg::Named(var));
                     },
@@ -108,11 +108,11 @@ pub struct ExprHandler;
 
 impl ExprHandler{
 
-    fn parse_val(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
+    fn parse_val(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
         match lex.next() {
-            Some(Token::Add) => return Self::parse_val(lex),
+            Some(Token::Add) => return Self::parse_val(lex, env),
             Some(Token::Sub) => {
-                let expr = match Self::parse_val(lex){
+                let expr = match Self::parse_val(lex, env){
                     Ok(expr) => expr,
                     Err(reason) => return Err(reason)
                 };
@@ -121,7 +121,7 @@ impl ExprHandler{
             Some(Token::Num(n)) => Ok(Expr { a: None, b: None, operation: Token::Num(n.clone()) }) ,
             Some(Token::Name(name)) =>{
                 let mut lex_tmp = lex.clone();
-                match parse_arglist(&mut lex_tmp) {
+                match parse_arglist(&mut lex_tmp, env) {
                     Ok(arg) => {
                         *lex=lex_tmp;
                         return Ok(Expr { a: None, b: None, operation: Token::Call(FunctionCall{name: name, arglist: arg}) });
@@ -133,7 +133,7 @@ impl ExprHandler{
                 }
             },
             Some(Token::PrenticesOpen) => {
-                let expr = Self::parse_expr(lex)?;
+                let expr = Self::parse_expr(lex, env)?;
 
                 let prentices_closed:Option<Token> = lex.next();
                 if prentices_closed != Some(Token::PrenticesClosed) {
@@ -142,14 +142,28 @@ impl ExprHandler{
 
                 Ok(expr)
             },
+            Some(Token::EvalOpen) => {
+                let val = match Self::parse_expr(lex, env)?.eval(env) {
+                    Ok(val) => val,
+                    Err(HandlerResult::Error(res)) => return Err(res),
+                    _ => return Err(String::from("Unexpected 150"))
+                };
+
+                let prentices_closed:Option<Token> = lex.next();
+                if prentices_closed != Some(Token::EvalClosed) {
+                    return Err(format!("Expected ']' got '{:?}' (\"{}\") at {:?}", prentices_closed.unwrap_or(Token::EOF), lex.slice(), lex.span()));
+                }
+
+                Ok(Expr{a: None, b: None, operation: Token::Num(val)})
+            }
             Some(Token::Ans) => Ok(Expr { a: None, b: None, operation: Token::Ans }),
             None => Err(String::from("Unexpected EOF!")),
             t @ _ => Err(format!("Expected '(' or 'Num' got '{:?}' (\"{}\") at {:?}. ", t.unwrap(), lex.slice(), lex.span()))
         }
     }
 
-    fn parse_expr_fac(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
-        let mut expr5 = Self::parse_val(lex)?;
+    fn parse_expr_fac(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
+        let mut expr5 = Self::parse_val(lex, env)?;
 
         loop{
             match lex.clone().next() {
@@ -163,10 +177,11 @@ impl ExprHandler{
         }
     }
 
-    fn parse_level<F>(lex: &mut logos::Lexer<Token>, expect: &[Token], next_func: F) -> Result<Expr, String>
-        where F: Fn(&mut logos::Lexer<Token>) -> Result<Expr, String>
+    fn parse_level<FL,FR>(lex: &mut logos::Lexer<Token>, env: &mut Environment, expect: &[Token], left_func: FL, right_func: FR) -> Result<Expr, String>
+        where FL: Fn(&mut logos::Lexer<Token>, &mut Environment) -> Result<Expr, String>,
+              FR: Fn(&mut logos::Lexer<Token>, &mut Environment) -> Result<Expr, String>
     {
-        let next_expr = next_func(lex)?;
+        let next_expr = right_func(lex, env)?;
 
         let next_token: Option<Token> = lex.clone().next();
 
@@ -178,7 +193,7 @@ impl ExprHandler{
             if Some(token)==next_token.as_ref() {
                 // Consume Element
                 lex.next();
-                let expr = Self::parse_level(lex, expect, next_func)?;
+                let expr = left_func(lex, env)?;
 
                 return Ok(Expr{ a: Some(Box::new(next_expr)), b: Some(Box::new(expr)), operation: token.clone()});
             }
@@ -187,35 +202,38 @@ impl ExprHandler{
         //Err(ParseError { error: format!("Expected {:?} or 'EOF' got '{:?}' (\"{}\") at {:?}.", expect.as_slice(), next_token.unwrap(), lex.slice(), lex.span())) })
     }
 
-    fn parse_expr_pow(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
-        Self::parse_level(lex, &[Token::Pow], Self::parse_expr_fac)
+    fn parse_expr_pow(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
+        Self::parse_level(lex, env, &[Token::Pow], Self::parse_expr_pow, Self::parse_expr_fac)
     }
-    fn parse_expr_div(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
-        Self::parse_level(lex, &[Token::Div], Self::parse_expr_pow)
+    fn parse_expr_div(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
+        Self::parse_level(lex, env, &[Token::Div], Self::parse_expr_div, Self::parse_expr_pow)
     }
-    fn parse_expr_mul(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
-        Self::parse_level(lex, &[Token::Mul], Self::parse_expr_div)
+    fn parse_expr_mul(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
+        Self::parse_level(lex, env, &[Token::Mul], Self::parse_expr_mul, Self::parse_expr_div)
     }
-    fn parse_expr_sub(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
+    fn parse_expr_mod(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
+        Self::parse_level(lex, env, &[Token::Mod], Self::parse_expr_mod, Self::parse_expr_mul)
+    }
+    fn parse_expr_sub(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
 
-        Self::parse_level(lex, &[Token::Sub], Self::parse_expr_mul)
+        Self::parse_level(lex, env, &[Token::Sub], Self::parse_expr_sub, Self::parse_expr_mod)
     }
-    fn parse_expr_add(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
+    fn parse_expr_add(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
 
-        Self::parse_level(lex, &[Token::Add], Self::parse_expr_sub)
+        Self::parse_level(lex, env, &[Token::Add], Self::parse_expr_add, Self::parse_expr_sub)
     }
-    fn parse_expr_cmp(lex: &mut logos::Lexer<Token>) -> Result<Expr, String> {
+    fn parse_expr_cmp(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String> {
 
-        Self::parse_level(lex, &[Token::Less, Token::Greater, Token::Equal], Self::parse_expr_add)
+        Self::parse_level(lex, env, &[Token::Less, Token::Greater, Token::Equal], Self::parse_expr_add, Self::parse_expr_add)
     }
-    pub fn parse_expr(lex: &mut logos::Lexer<Token>) -> Result<Expr, String>{
-        return Ok(Self::parse_expr_cmp(lex)?);
+    pub fn parse_expr(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Expr, String>{
+        return Ok(Self::parse_expr_cmp(lex, env)?);
     }
 }
 
 impl ParseHandler for ExprHandler{
     fn handle(&self, lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult {
-        let expr = match Self::parse_expr(lex) {
+        let expr = match Self::parse_expr(lex, env) {
             Ok(expr) => expr,
             Err(reason) =>{return HandlerResult::Error(reason);}
         };
@@ -274,7 +292,7 @@ impl AssignHandler{
 
     }
 
-    fn parse_variable(lex: &mut logos::Lexer<Token>) -> Result<Variable, HandlerResult>{
+    fn parse_variable(lex: &mut logos::Lexer<Token>, env: &mut Environment) -> Result<Variable, HandlerResult>{
         
         let name = match lex.next() {
             Some(Token::Name(name)) => name,
@@ -297,7 +315,7 @@ impl AssignHandler{
             _ => return Err(HandlerResult::Pass)
         };
 
-        let expr = match ExprHandler::parse_expr(lex) {
+        let expr = match ExprHandler::parse_expr(lex, env) {
             Ok(expr) => expr,
             Err(reason) => return Err(HandlerResult::Error(reason))
         };
@@ -313,7 +331,7 @@ impl AssignHandler{
         };
 
         let mut lex_tmp = lex.clone();
-        let argnames = match Self::parse_argnames(&mut lex_tmp) {
+        let _argnames = match Self::parse_argnames(&mut lex_tmp) {
             Ok(argnames) => {
                 *lex=lex_tmp;
                 argnames
@@ -341,7 +359,7 @@ impl ParseHandler for AssignHandler{
     fn handle(&self, lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
     {
         let mut lex_tmp = lex.clone();
-        match Self::parse_variable(&mut lex_tmp){
+        match Self::parse_variable(&mut lex_tmp, env){
             Ok(mut var) => {
                 var.def_string=Some(lex.source().to_string());
 
@@ -453,14 +471,21 @@ impl MacroHandler{
 	pub fn parse_clear(_lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
     {
         *env = Environment{run: true,
-                                    variables: Vec::new(),
-                                    last_input: None,
-                                    last_result: None,
-                                    macros: vec![Macro{name: String::from("save"), val: MacroVal::Internal(MacroHandler::parse_save)},
-                                                Macro{name: String::from("load"), val: MacroVal::Internal(MacroHandler::parse_load)},
-                                                Macro{name: String::from("clear"), val: MacroVal::Internal(MacroHandler::parse_load)}
-                                            ]
-                                    };
+                                           variables: Vec::new(),
+                                           last_input: None,
+                                           last_result: None,
+                                           macros: vec![Macro{name: String::from("save"), val: MacroVal::Internal(MacroHandler::parse_save)},
+                                                        Macro{name: String::from("load"), val: MacroVal::Internal(MacroHandler::parse_load)},
+                                                        Macro{name: String::from("clear"), val: MacroVal::Internal(MacroHandler::parse_load)},
+                                                        Macro{name: String::from("exit"), val: MacroVal::Internal(MacroHandler::parse_exit)}
+                                                    ],
+                                           defined_functions: vec![
+                                                        Function{ name: String::from("ceil"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::ceil(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))},
+                                                        Function{ name: String::from("floor"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::floor(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))}
+                                                    ]
+                                          };
+
+
         HandlerResult::Ok
     }
 	pub fn parse_exit(_lex: &mut logos::Lexer<Token>, env: &mut Environment) -> HandlerResult
@@ -490,9 +515,11 @@ impl ParseHandler for MacroHandler{
         let res = match &mac.val {
             MacroVal::Internal(func) => func(lex, env),
             MacroVal::User(commands) =>{
+                let tmp = String::from(lex.source());
                 for command in commands{
                     calc_parse(&command, env);
                 }
+                env.last_input=Some(tmp);
                 HandlerResult::Ok
             }
         };

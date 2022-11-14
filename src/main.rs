@@ -69,8 +69,8 @@ impl Variable{
     fn compile_expr(&self, expr: &mut Expr, args: &Vec<Variable>) -> Result<(),String>{
         match &mut expr.operation {
             Token::Call(func) => {
-                for arg in &mut func.arglist {
-                    match arg {
+                for mut arg in &mut func.arglist {
+                    match &mut arg {
                         Arg::Ordered(expr) =>{
                             self.compile_expr(expr, args)?;
                         }
@@ -135,10 +135,15 @@ pub struct Macro{
     val: MacroVal
 }
 
+pub struct Function{
+    name: String,
+    val: Box<dyn Fn(&Vec<Arg>, &Environment) -> Result<Number, HandlerResult>>
+}
 
 pub struct Environment{
     run: bool,
     variables: Vec<Variable>,
+    defined_functions: Vec<Function>,
     macros: Vec<Macro>,
     last_input: Option<String>,
     last_result: Option<Number>
@@ -178,6 +183,9 @@ pub enum Token{
     #[token("/")]
     Div,
 
+    #[token("%")]
+    Mod,
+
     #[token("^")]
     Pow,
 
@@ -204,6 +212,12 @@ pub enum Token{
 
     #[token(")")]
     PrenticesClosed,
+
+    #[token("[")]
+    EvalOpen,
+
+    #[token("]")]
+    EvalClosed,
 
     #[error]
     // whitespaces
@@ -245,7 +259,11 @@ impl Expr{
             Token::Call(func) => {
                 let var = env.variables.iter().find(|&var| var.name==*func.name);
                 if var.is_none(){
-                    return Err(HandlerResult::Error(format!("Function '{}' not defined!", func.name)));
+                    let var = env.defined_functions.iter().find(|&var| var.name==*func.name);
+                    if var.is_none(){
+                        return Err(HandlerResult::Error(format!("Function '{}' not defined!", func.name)));
+                    }
+                    return (var.unwrap().val)(&func.arglist, env);
                 }
                 return var.unwrap().eval(&func.arglist)?.eval(env);
             },
@@ -275,6 +293,14 @@ impl Expr{
                     Err(HandlerResult::Error(String::from("Divison by Zero")))
                 }
             },
+            Token::Mod => {
+                if b < -0.00001 || b > 0.000001{
+                    Ok(a % b)
+                }
+                else {
+                    Err(HandlerResult::Error(String::from("Modules by Zero")))
+                }
+            }
             Token::Pow => Ok(a.powf(b)),
             Token::Greater => Ok(Into::<i8>::into(a>b).into()),
             Token::Less => Ok(Into::<i8>::into(a<b).into()),
@@ -311,7 +337,7 @@ pub fn calc_parse(input: &String, env: &mut Environment){
     // if no input, use last valid input or skip
     if input.len()==0{
         if env.last_input.is_some(){
-            input = env.last_input.as_ref().unwrap().clone().clone();
+            input = env.last_input.as_ref().unwrap().clone();
         }else{
             return;
         }
@@ -357,7 +383,7 @@ pub fn calc_parse_file<T: AsRef<Path> + std::fmt::Debug>(path: T, env: &mut Envi
     }
     HandlerResult::Ok
 }
-pub const VERSION: &str = "0.7.4";
+pub const VERSION: &str = "0.8.4";
 
 fn main() {
     println!("Calc v{VERSION}");
@@ -368,7 +394,12 @@ fn main() {
                                            last_result: None,
                                            macros: vec![Macro{name: String::from("save"), val: MacroVal::Internal(MacroHandler::parse_save)},
                                                         Macro{name: String::from("load"), val: MacroVal::Internal(MacroHandler::parse_load)},
-                                                        Macro{name: String::from("clear"), val: MacroVal::Internal(MacroHandler::parse_load)}
+                                                        Macro{name: String::from("clear"), val: MacroVal::Internal(MacroHandler::parse_load)},
+                                                        Macro{name: String::from("exit"), val: MacroVal::Internal(MacroHandler::parse_exit)}
+                                                    ],
+                                           defined_functions: vec![
+                                                        Function{ name: String::from("ceil"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::ceil(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))},
+                                                        Function{ name: String::from("floor"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::floor(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))}
                                                     ]
                                           };
 

@@ -383,7 +383,7 @@ pub fn calc_parse_file<T: AsRef<Path> + std::fmt::Debug>(path: T, env: &mut Envi
     }
     HandlerResult::Ok
 }
-pub const VERSION: &str = "0.8.4";
+pub const VERSION: &str = "0.8.6";
 
 fn main() {
     println!("Calc v{VERSION}");
@@ -399,7 +399,40 @@ fn main() {
                                                     ],
                                            defined_functions: vec![
                                                         Function{ name: String::from("ceil"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::ceil(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))},
-                                                        Function{ name: String::from("floor"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::floor(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))}
+                                                        Function{ name: String::from("floor"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::floor(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))},
+                                                        Function{ name: String::from("log"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| {
+                                                                                                           let mut base = None;
+                                                                                                           let mut x = None;
+                                                                                                           for arg in arg_list {
+                                                                                                               match arg {
+                                                                                                                   Arg::Named(var) => {
+                                                                                                                           match  var.name.as_str() {
+                                                                                                                               "base" | "b" => {base=Some(var.val.clone())},
+                                                                                                                               "x" => {x=Some(var.val.clone())},
+                                                                                                                               _ => {}
+                                                                                                                           }
+                                                                                                                       },
+                                                                                                                   Arg::Ordered(val) => {
+                                                                                                                       if base == None {
+                                                                                                                           base=Some(val.clone());
+                                                                                                                       } else {
+                                                                                                                           x = Some(val.clone());
+                                                                                                                       }
+                                                                                                                   }
+                                                                                                               }
+                                                                                                           }
+                                                                                                        if x == None {
+                                                                                                            return Err(HandlerResult::Error("no value specified".to_string()));
+                                                                                                        }
+                                                                                                        if base == None {
+                                                                                                            return Err(HandlerResult::Error("no base specified".to_string()));
+                                                                                                        }
+                                                            Ok(f64::log(x.unwrap().eval(env)?, base.unwrap().eval(env)?))})},
+                                                        Function{ name: String::from("ln"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::log(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?, std::f64::consts::E)))},
+                                                        Function{ name: String::from("lg"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::log10(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))},
+                                                        Function{ name: String::from("sin"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::sin(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))},
+                                                        Function{ name: String::from("cos"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::cos(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))},
+                                                        Function{ name: String::from("tan"), val: Box::new(|arg_list: &Vec<Arg>, env: &Environment| Ok(f64::tan(match &arg_list[0] {Arg::Named(var) => var.val.clone(), Arg::Ordered(val) => val.clone()}.eval(env)?)))}
                                                     ]
                                           };
 
